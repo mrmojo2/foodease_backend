@@ -1,0 +1,47 @@
+Authentication Routes:
+- POST   /auth/login          - Admin login
+- POST   /auth/logout         - Admin logout
+- GET    /auth/me            - Get current admin details
+- PATCH  /auth/updateUser    - Update admin profile
+- PATCH  /auth/updatePassword - Update admin password
+
+Menu Management Routes:
+- GET    /menu               - Get all menu items
+- POST   /menu              - Create new menu item
+- GET    /menu/:id          - Get single menu item
+- PATCH  /menu/:id          - Update menu item
+- DELETE /menu/:id          - Delete menu item
+- PATCH  /menu/image/:id    - update image for a menu item
+- GET    /menu/category/:categoryId - Get items by category
+
+Category Routes:
+- GET    /categories        - Get all categories
+- POST   /categories        - Create new category
+- GET    /categories/:id    - Get single category
+- PATCH  /categories/:id    - Update category
+- DELETE /categories/:id    - Delete category
+- PATCH  /categories/image/:id    - update image for a category item
+
+Table Management Routes:
+- GET    /tables           - Get all tables
+- POST   /tables          - Create new table
+- GET    /tables/:id      - Get single table
+- PATCH  /tables/:id      - Update table
+- DELETE /tables/:id      - Delete table
+- PATCH  /tables/:id/status - Update table status
+
+Order Management Routes:
+- GET    /orders          - Get all orders
+- POST   /orders         - Create new order
+- GET    /orders/:id     - Get single order
+- PATCH  /orders/:id     - Update order
+- DELETE /orders/:id     - Delete order
+- PATCH  /orders/:id/status - Update order status
+- GET    /orders/table/:tableId - Get orders by table
+- GET    /orders/status/:status - Get orders by status
+
+Statistics Routes:
+- GET    /stats/daily    - Get daily statistics
+- GET    /stats/weekly   - Get weekly statistics
+- GET    /stats/monthly  - Get monthly statistics
+- GET    /stats/custom   - Get custom date range statistics
