@@ -1,5 +1,3 @@
-import MenuItem from "../models/MenuItem.js"
-import Category from "../models/Category.js"
 import { StatusCodes } from "http-status-codes"
 import HttpError from '../error/HttpError.js'
 import { v2 as cloudinary } from "cloudinary"
@@ -216,39 +214,155 @@ const getSingleMenuItem = async (req, res) => {
 
 
 const updateMenuItem = async (req, res) => {
-    const { id: menuItemId } = req.params
-    const { name, description, price, category, image_url, customization_options, is_available } = req.body
+    const { id: menuItemId } = req.params;
+    const { name, description, price, category, image_url, customization_options, is_available } = req.body;
 
+    // 1) Ensure the menu item exists
+    const [existing] = await pool.query('SELECT _id FROM menu_items WHERE _id = ?', [menuItemId]);
+    if (existing.length === 0) {
+        throw new HttpError(`No menu item with id: ${menuItemId}`, StatusCodes.NOT_FOUND);
+    }
+
+    // 2) Validate category if provided
     if (category) {
-        const categoryExists = await Category.findById(category)
-        if (!categoryExists) {
-            throw new HttpError('Invalid category', StatusCodes.BAD_REQUEST)
+        const [cat] = await pool.query('SELECT _id FROM categories WHERE _id = ?', [category]);
+        if (cat.length === 0) {
+            throw new HttpError('Invalid category', StatusCodes.BAD_REQUEST);
         }
     }
 
-    const menuItem = await MenuItem.findOneAndUpdate(
-        { _id: menuItemId },
-        { name, description, price, category, image_url, customization_options, is_available },
-        { new: true, runValidators: true }
-    )
+    // 3) Transaction: update core fields; if customization_options provided, replace groups/options
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
 
-    if (!menuItem) {
-        throw new HttpError(`No menu item with id: ${menuItemId}`, StatusCodes.NOT_FOUND)
+        // Update core fields (only the ones provided)
+        await conn.query(
+            `
+      UPDATE menu_items
+      SET
+        name = COALESCE(?, name),
+        description = COALESCE(?, description),
+        price = COALESCE(?, price),
+        category_id = COALESCE(?, category_id),
+        image_url = COALESCE(?, image_url),
+        is_available = COALESCE(?, is_available)
+      WHERE _id = ?
+      `,
+            [
+                name ?? null,
+                description ?? null,
+                price ?? null,
+                category ?? null,
+                image_url ?? null,
+                typeof is_available === 'boolean' ? is_available : null,
+                menuItemId,
+            ]
+        );
+
+        // If client sent customization groups, replace them
+        if (Array.isArray(customization_options)) {
+            // Delete existing groups (options will cascade-delete)
+            await conn.query('DELETE FROM menu_item_customization_groups WHERE menu_item_id = ?', [menuItemId]);
+
+            // Re-insert groups + options
+            for (const group of customization_options) {
+                const [g] = await conn.query(
+                    'INSERT INTO menu_item_customization_groups (menu_item_id, name) VALUES (?, ?)',
+                    [menuItemId, group.name]
+                );
+                const groupId = g.insertId;
+
+                if (Array.isArray(group.options)) {
+                    for (const option of group.options) {
+                        await conn.query(
+                            'INSERT INTO menu_item_customization_options (group_id, name, price_addition) VALUES (?, ?, ?)',
+                            [groupId, option.name, option.price_addition ?? 0]
+                        );
+                    }
+                }
+            }
+        }
+
+        await conn.commit();
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
     }
 
-    res.status(StatusCodes.OK).json({ menuItem })
-}
+    // 4) Return the updated item in the same shape as getSingleMenuItem
+    const [rows] = await pool.query(get_menuitem_by_id, [menuItemId]);
+    if (rows.length === 0) {
+        // Shouldn’t happen, but just in case
+        throw new HttpError(`No menu item with id: ${menuItemId}`, StatusCodes.NOT_FOUND);
+    }
+
+    const first = rows[0];
+    const categoryObj = {
+        _id: first.category_id.toString(),
+        name: first.category_name,
+        description: first.category_description,
+        display_order: first.category_display_order,
+        thumbnail_url: first.category_thumbnail_url,
+        createdAt: first.category_created_at,
+        updatedAt: first.category_updated_at,
+        __v: 0,
+    };
+
+    const groupMap = new Map();
+    for (const row of rows) {
+        if (!row.group_id) continue;
+        const gid = row.group_id.toString();
+        if (!groupMap.has(gid)) {
+            groupMap.set(gid, { _id: gid, name: row.group_name, options: [] });
+        }
+        if (row.option_id) {
+            groupMap.get(gid).options.push({
+                _id: row.option_id.toString(),
+                name: row.option_name,
+                price_addition: parseFloat(row.price_addition),
+            });
+        }
+    }
+
+    const menuItem = {
+        _id: first.menu_item_id.toString(),
+        name: first.menu_item_name,
+        description: first.menu_item_description,
+        price: parseFloat(first.price),
+        category: categoryObj,
+        image_url: first.image_url,
+        customization_options: Array.from(groupMap.values()),
+        is_available: !!first.is_available,
+        createdAt: first.menu_item_created_at,
+        updatedAt: first.menu_item_updated_at,
+        __v: 0,
+    };
+
+    res.status(StatusCodes.OK).json({ menuItem });
+};
 
 const deleteMenuItem = async (req, res) => {
-    const { id: menuItemId } = req.params
-    const menuItem = await MenuItem.findOneAndDelete({ _id: menuItemId })
+    const { id: menuItemId } = req.params;
 
-    if (!menuItem) {
-        throw new HttpError(`No menu item with id: ${menuItemId}`, StatusCodes.NOT_FOUND)
+    // Ensure exists
+    const [existing] = await pool.query('SELECT _id FROM menu_items WHERE _id = ?', [menuItemId]);
+    if (existing.length === 0) {
+        throw new HttpError(`No menu item with id: ${menuItemId}`, StatusCodes.NOT_FOUND);
     }
 
-    res.status(StatusCodes.OK).json({ msg: 'Menu item removed' })
-}
+    // Delete (customization groups/options will cascade because of FK constraints)
+    const [result] = await pool.query('DELETE FROM menu_items WHERE _id = ?', [menuItemId]);
+
+    if (result.affectedRows === 0) {
+        throw new HttpError(`Failed to delete menu item: ${menuItemId}`, StatusCodes.INTERNAL_SERVER_ERROR);
+    }
+
+    res.status(StatusCodes.OK).json({ msg: 'Menu item removed' });
+};
+
 
 const getItemsByCategory = async (req, res) => {
     const { categoryId } = req.params;

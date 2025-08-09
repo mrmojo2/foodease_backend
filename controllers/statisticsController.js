@@ -1,593 +1,342 @@
-import mongoose from 'mongoose';
-import Order from '../models/Order.js';
-import MenuItem from '../models/MenuItem.js';
-import Category from '../models/Category.js';
-import Table from '../models/Table.js';
+// controllers/statisticsController.js
+import { StatusCodes } from "http-status-codes";
+import HttpError from "../error/HttpError.js";
+import pool from "../db/db.js";
+import {
+  q_total_revenue_since,
+  q_total_revenue_between,
+  q_total_orders_since,
+  q_total_orders_between,
+  q_active_tables_count,
+  q_daily_revenue_since,
+  q_weekly_revenue_since,
+  q_monthly_revenue_since,
+  q_top_items_30d,
+  q_revenue_by_category_30d,
+  q_year_revenue_from,
+  q_status_distribution_30d,
+  q_payment_method_distribution_30d,
+  q_hourly_distribution_30d,
+} from "../queries/statisticsQueries.js";
+
+const STATUSES_ALL = ['pending', 'preparing', 'served', 'complete', 'cancelled'];
+const METHODS_ALL = ['cash', 'online_payment'];
+
+/* --------------------------- utilities --------------------------- */
+
+function startOfToday() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function addDays(date, n) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + n);
+  return d;
+}
+
+function addMonths(date, n) {
+  const d = new Date(date);
+  d.setMonth(d.getMonth() + n);
+  return d;
+}
+
+function startOfYear(year) {
+  return new Date(year, 0, 1, 0, 0, 0, 0);
+}
+
+function endOfYear(year) {
+  return new Date(year, 11, 31, 23, 59, 59, 999);
+}
+
+/* --------------------------- controller --------------------------- */
 
 export const StatisticsController = {
-  // Get basic dashboard statistics
+  // Basic dashboard stats (last 30 days + prev 30 days for growth)
   getDashboardStats: async (req, res) => {
     try {
-      // Get current date and date for 30 days ago
-      const today = new Date();
-      const thirtyDaysAgo = new Date(today);
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      
-      // Get previous period for comparison
-      const sixtyDaysAgo = new Date(thirtyDaysAgo);
-      sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 30);
-      
-      // Basic stats for current period
-      const totalRevenue = await Order.aggregate([
-        { $match: { 
-          status: 'complete', 
-          payment_status: 'paid',
-          createdAt: { $gte: thirtyDaysAgo }
-        }},
-        { $group: { _id: null, total: { $sum: '$total_amount' } }}
-      ]);
-      
-      const totalOrders = await Order.countDocuments({
-        createdAt: { $gte: thirtyDaysAgo },
-        status: { $in: ['complete', 'served'] }
-      });
-      
-      const avgOrderValue = totalOrders > 0 ? 
-        (totalRevenue.length > 0 ? totalRevenue[0].total / totalOrders : 0) : 0;
-      
-      // Basic stats for previous period (for growth calculation)
-      const prevTotalRevenue = await Order.aggregate([
-        { $match: { 
-          status: 'complete', 
-          payment_status: 'paid',
-          createdAt: { $gte: sixtyDaysAgo, $lt: thirtyDaysAgo }
-        }},
-        { $group: { _id: null, total: { $sum: '$total_amount' } }}
-      ]);
-      
-      const prevTotalOrders = await Order.countDocuments({
-        createdAt: { $gte: sixtyDaysAgo, $lt: thirtyDaysAgo },
-        status: { $in: ['complete', 'served'] }
-      });
-      
-      // Calculate growth percentages
-      const revenueGrowth = prevTotalRevenue.length > 0 && prevTotalRevenue[0].total > 0 ?
-        ((totalRevenue.length > 0 ? totalRevenue[0].total : 0) - prevTotalRevenue[0].total) / prevTotalRevenue[0].total * 100 : 0;
-      
-      const ordersGrowth = prevTotalOrders > 0 ?
-        (totalOrders - prevTotalOrders) / prevTotalOrders * 100 : 0;
-      
-      // Get active tables
-      const activeTables = await Order.distinct('table', { 
-        status: { $in: ['pending', 'preparing', 'served'] }
-      }).then(tableIds => tableIds.length);
-      
-      return res.status(200).json({
-        totalRevenue: totalRevenue.length > 0 ? totalRevenue[0].total : 0,
+      const today = startOfToday();
+      const thirtyDaysAgo = addDays(today, -30);
+      const sixtyDaysAgo = addDays(thirtyDaysAgo, -30);
+
+      const [[revNowRow]] = await pool.query(q_total_revenue_since, [thirtyDaysAgo]);
+      const totalRevenue = Number(revNowRow?.total ?? 0);
+
+      const [[ordersNowRow]] = await pool.query(q_total_orders_since, [thirtyDaysAgo]);
+      const totalOrders = Number(ordersNowRow?.count ?? 0);
+
+      const avgOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
+
+      const [[revPrevRow]] = await pool.query(q_total_revenue_between, [sixtyDaysAgo, thirtyDaysAgo]);
+      const prevRevenue = Number(revPrevRow?.total ?? 0);
+
+      const [[ordersPrevRow]] = await pool.query(q_total_orders_between, [sixtyDaysAgo, thirtyDaysAgo]);
+      const prevOrders = Number(ordersPrevRow?.count ?? 0);
+
+      const revenueGrowth = prevRevenue > 0 ? ((totalRevenue - prevRevenue) / prevRevenue) * 100 : 0;
+      const ordersGrowth = prevOrders > 0 ? ((totalOrders - prevOrders) / prevOrders) * 100 : 0;
+
+      const [[activeTablesRow]] = await pool.query(q_active_tables_count);
+      const activeTables = Number(activeTablesRow?.active_tables ?? 0);
+
+      return res.status(StatusCodes.OK).json({
+        totalRevenue,
         totalOrders,
         avgOrderValue,
         activeTables,
         revenueGrowth,
         ordersGrowth
       });
-    } catch (error) {
-      console.error('Error getting dashboard stats:', error);
-      return res.status(500).json({ error: 'Failed to get dashboard statistics' });
+    } catch (err) {
+      console.error("Error getting dashboard stats:", err);
+      return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: "Failed to get dashboard statistics" });
     }
   },
-  
-  // Get daily revenue for the past 7 days
+
+  // Daily revenue for last 7 days
   getDailyRevenue: async (req, res) => {
     try {
-      const today = new Date();
-      const sevenDaysAgo = new Date(today);
-      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-      
-      const dailyRevenue = await Order.aggregate([
-        { 
-          $match: { 
-            status: 'complete', 
-            payment_status: 'paid',
-            createdAt: { $gte: sevenDaysAgo }
-          }
-        },
-        {
-          $group: {
-            _id: { 
-              $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } 
-            },
-            revenue: { $sum: "$total_amount" }
-          }
-        },
-        { $sort: { _id: 1 } }
-      ]);
-      
-      // Fill in missing days with zero revenue
+      const today = startOfToday();
+      const sevenDaysAgo = addDays(today, -7);
+
+      const [rows] = await pool.query(q_daily_revenue_since, [sevenDaysAgo]);
+
+      // Fill missing days
       const result = [];
       for (let i = 0; i < 7; i++) {
-        const date = new Date(today);
-        date.setDate(date.getDate() - (6 - i));
-        const dateString = date.toISOString().split('T')[0];
-        
-        const existingDay = dailyRevenue.find(day => day._id === dateString);
+        const d = addDays(today, -(6 - i));
+        const dateStr = d.toISOString().slice(0, 10);
+        const found = rows.find(r => r.date === dateStr);
         result.push({
-          date: dateString,
-          revenue: existingDay ? existingDay.revenue : 0
+          date: dateStr,
+          revenue: Number(found?.revenue ?? 0)
         });
       }
-      
-      return res.status(200).json(result);
-    } catch (error) {
-      console.error('Error getting daily revenue:', error);
-      return res.status(500).json({ error: 'Failed to get daily revenue' });
+
+      return res.status(StatusCodes.OK).json(result);
+    } catch (err) {
+      console.error("Error getting daily revenue:", err);
+      return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: "Failed to get daily revenue" });
     }
   },
-  
-  // Get weekly revenue for the past 4 weeks
+
+  // Weekly revenue for last 4 weeks (ISO week)
   getWeeklyRevenue: async (req, res) => {
     try {
-      const today = new Date();
-      const fourWeeksAgo = new Date(today);
-      fourWeeksAgo.setDate(fourWeeksAgo.getDate() - 28);
-      
-      const weeklyRevenue = await Order.aggregate([
-        { 
-          $match: { 
-            status: 'complete', 
-            payment_status: 'paid',
-            createdAt: { $gte: fourWeeksAgo }
-          }
-        },
-        {
-          $group: {
-            _id: { 
-              year: { $year: "$createdAt" },
-              week: { $week: "$createdAt" }
-            },
-            revenue: { $sum: "$total_amount" },
-            startDate: { $min: "$createdAt" }
-          }
-        },
-        { $sort: { "_id.year": 1, "_id.week": 1 } }
-      ]);
-      
-      // Format the result
-      const result = weeklyRevenue.map(week => ({
-        week: `Week ${week._id.week}`,
-        revenue: week.revenue,
-        startDate: week.startDate.toISOString().split('T')[0]
+      const today = startOfToday();
+      const fourWeeksAgo = addDays(today, -28);
+
+      const [rows] = await pool.query(q_weekly_revenue_since, [fourWeeksAgo]);
+
+      const result = rows.map(r => ({
+        week: `Week ${r.week_number}`,
+        revenue: Number(r.revenue),
+        startDate: r.week_start.toISOString().slice(0, 10)
       }));
-      
-      return res.status(200).json(result);
-    } catch (error) {
-      console.error('Error getting weekly revenue:', error);
-      return res.status(500).json({ error: 'Failed to get weekly revenue' });
+
+      return res.status(StatusCodes.OK).json(result);
+    } catch (err) {
+      console.error("Error getting weekly revenue:", err);
+      return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: "Failed to get weekly revenue" });
     }
   },
-  
-  // Get monthly revenue for the past 12 months
+
+  // Monthly revenue for last 12 months
   getMonthlyRevenue: async (req, res) => {
     try {
-      const today = new Date();
-      const twelveMonthsAgo = new Date(today);
-      twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 12);
-      
-      const monthlyRevenue = await Order.aggregate([
-        { 
-          $match: { 
-            status: 'complete', 
-            payment_status: 'paid',
-            createdAt: { $gte: twelveMonthsAgo }
-          }
-        },
-        {
-          $group: {
-            _id: { 
-              year: { $year: "$createdAt" },
-              month: { $month: "$createdAt" }
-            },
-            revenue: { $sum: "$total_amount" }
-          }
-        },
-        { $sort: { "_id.year": 1, "_id.month": 1 } }
-      ]);
-      
-      // Format the result with month names
+      const today = startOfToday();
+      const twelveMonthsAgo = addMonths(today, -12);
+
+      const [rows] = await pool.query(q_monthly_revenue_since, [twelveMonthsAgo]);
+
       const monthNames = [
         'January', 'February', 'March', 'April', 'May', 'June',
         'July', 'August', 'September', 'October', 'November', 'December'
       ];
-      
-      const result = monthlyRevenue.map(month => ({
-        month: monthNames[month._id.month - 1],
-        revenue: month.revenue,
-        year: month._id.year
+
+      const result = rows.map(r => ({
+        month: monthNames[r.month - 1],
+        revenue: Number(r.revenue),
+        year: r.year
       }));
-      
-      return res.status(200).json(result);
-    } catch (error) {
-      console.error('Error getting monthly revenue:', error);
-      return res.status(500).json({ error: 'Failed to get monthly revenue' });
+
+      return res.status(StatusCodes.OK).json(result);
+    } catch (err) {
+      console.error("Error getting monthly revenue:", err);
+      return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: "Failed to get monthly revenue" });
     }
   },
-  
-  // Get most sold items (top 5)
+
+  // Most sold items (top 5) last 30 days
   getMostSoldItems: async (req, res) => {
     try {
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      
-      const mostSoldItems = await Order.aggregate([
-        { 
-          $match: { 
-            createdAt: { $gte: thirtyDaysAgo },
-            status: { $in: ['complete', 'served'] }
-          }
-        },
-        { $unwind: "$items" },
-        {
-          $group: {
-            _id: "$items.item",
-            totalQuantity: { $sum: "$items.quantity" },
-            totalRevenue: { $sum: { $multiply: ["$items.price", "$items.quantity"] } }
-          }
-        },
-        {
-          $lookup: {
-            from: "menuitems",
-            localField: "_id",
-            foreignField: "_id",
-            as: "menuItem"
-          }
-        },
-        { $unwind: "$menuItem" },
-        {
-          $project: {
-            _id: 1,
-            name: "$menuItem.name",
-            totalQuantity: 1,
-            totalRevenue: 1,
-            category: "$menuItem.category"
-          }
-        },
-        { $sort: { totalQuantity: -1 } },
-        { $limit: 5 }
-      ]);
-      
-      // Lookup category names
-      const categoryIds = [...new Set(mostSoldItems.map(item => item.category))];
-      const categories = await Category.find({ _id: { $in: categoryIds } });
-      
-      const result = mostSoldItems.map(item => {
-        const category = categories.find(cat => cat._id.toString() === item.category.toString());
-        return {
-          id: item._id,
-          name: item.name,
-          totalQuantity: item.totalQuantity,
-          totalRevenue: item.totalRevenue,
-          category: category ? category.name : 'Unknown'
-        };
-      });
-      
-      return res.status(200).json(result);
-    } catch (error) {
-      console.error('Error getting most sold items:', error);
-      return res.status(500).json({ error: 'Failed to get most sold items' });
+      const thirtyDaysAgo = addDays(startOfToday(), -30);
+      const [rows] = await pool.query(q_top_items_30d, [thirtyDaysAgo]);
+
+      const result = rows.map(r => ({
+        id: r.menu_item_id,
+        name: r.menu_item_name,
+        totalQuantity: Number(r.total_qty),
+        totalRevenue: Number(r.total_rev),
+        category: r.category_name ?? 'Unknown'
+      }));
+
+      return res.status(StatusCodes.OK).json(result);
+    } catch (err) {
+      console.error("Error getting most sold items:", err);
+      return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: "Failed to get most sold items" });
     }
   },
-  
-  // Get revenue by category
+
+  // Revenue by category last 30 days
   getRevenueByCategory: async (req, res) => {
     try {
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      
-      const revenueByCategory = await Order.aggregate([
-        { 
-          $match: { 
-            createdAt: { $gte: thirtyDaysAgo },
-            status: 'complete',
-            payment_status: 'paid'
-          }
-        },
-        { $unwind: "$items" },
-        {
-          $lookup: {
-            from: "menuitems",
-            localField: "items.item",
-            foreignField: "_id",
-            as: "menuItem"
-          }
-        },
-        { $unwind: "$menuItem" },
-        {
-          $group: {
-            _id: "$menuItem.category",
-            revenue: { $sum: { $multiply: ["$items.price", "$items.quantity"] } }
-          }
-        },
-        {
-          $lookup: {
-            from: "categories",
-            localField: "_id",
-            foreignField: "_id",
-            as: "category"
-          }
-        },
-        { $unwind: "$category" },
-        {
-          $project: {
-            _id: 1,
-            name: "$category.name",
-            revenue: 1
-          }
-        },
-        { $sort: { revenue: -1 } }
-      ]);
-      
-      return res.status(200).json(revenueByCategory);
-    } catch (error) {
-      console.error('Error getting revenue by category:', error);
-      return res.status(500).json({ error: 'Failed to get revenue by category' });
+      const thirtyDaysAgo = addDays(startOfToday(), -30);
+      const [rows] = await pool.query(q_revenue_by_category_30d, [thirtyDaysAgo]);
+
+      const result = rows.map(r => ({
+        _id: r.category_id,
+        name: r.category_name,
+        revenue: Number(r.revenue)
+      }));
+
+      return res.status(StatusCodes.OK).json(result);
+    } catch (err) {
+      console.error("Error getting revenue by category:", err);
+      return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: "Failed to get revenue by category" });
     }
   },
-  
-  // Get year-over-year growth
+
+  // Year-over-year growth
   getYearOverYearGrowth: async (req, res) => {
     try {
       const today = new Date();
-      
-      // Current year
-      const currentYearStart = new Date(today.getFullYear(), 0, 1);
-      
-      // Previous year
-      const prevYearStart = new Date(today.getFullYear() - 1, 0, 1);
-      const prevYearEnd = new Date(today.getFullYear(), 0, 0);
-      
-      // Get current year revenue
-      const currentYearRevenue = await Order.aggregate([
-        { 
-          $match: { 
-            status: 'complete', 
-            payment_status: 'paid',
-            createdAt: { $gte: currentYearStart }
-          }
-        },
-        { $group: { _id: null, total: { $sum: '$total_amount' } }}
-      ]);
-      
-      // Get previous year revenue
-      const prevYearRevenue = await Order.aggregate([
-        { 
-          $match: { 
-            status: 'complete', 
-            payment_status: 'paid',
-            createdAt: { $gte: prevYearStart, $lte: prevYearEnd }
-          }
-        },
-        { $group: { _id: null, total: { $sum: '$total_amount' } }}
-      ]);
-      
-      // Calculate growth
-      const currentRevenue = currentYearRevenue.length > 0 ? currentYearRevenue[0].total : 0;
-      const prevRevenue = prevYearRevenue.length > 0 ? prevYearRevenue[0].total : 0;
-      
-      const growth = prevRevenue > 0 ? 
-        ((currentRevenue - prevRevenue) / prevRevenue) * 100 : 
-        (currentRevenue > 0 ? 100 : 0);
-      
-      return res.status(200).json({
+      const currentYearStart = startOfYear(today.getFullYear());
+      const prevYearStart = startOfYear(today.getFullYear() - 1);
+      const prevYearEnd = endOfYear(today.getFullYear() - 1);
+
+      const [[curr]] = await pool.query(q_year_revenue_from, [currentYearStart]);
+      const [[prev]] = await pool.query(q_total_revenue_between, [prevYearStart, prevYearEnd]);
+
+      const currentRevenue = Number(curr?.total ?? 0);
+      const previousRevenue = Number(prev?.total ?? 0);
+
+      const growthPercentage = previousRevenue > 0
+        ? ((currentRevenue - previousRevenue) / previousRevenue) * 100
+        : (currentRevenue > 0 ? 100 : 0);
+
+      return res.status(StatusCodes.OK).json({
         currentYearRevenue: currentRevenue,
-        previousYearRevenue: prevRevenue,
-        growthPercentage: growth
+        previousYearRevenue: previousRevenue,
+        growthPercentage
       });
-    } catch (error) {
-      console.error('Error getting year-over-year growth:', error);
-      return res.status(500).json({ error: 'Failed to get year-over-year growth' });
+    } catch (err) {
+      console.error("Error getting year-over-year growth:", err);
+      return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: "Failed to get year-over-year growth" });
     }
   },
-  
-  // Get order status distribution
+
+  // Order status distribution last 30 days
   getOrderStatusDistribution: async (req, res) => {
     try {
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      
-      const statusDistribution = await Order.aggregate([
-        { 
-          $match: { 
-            createdAt: { $gte: thirtyDaysAgo }
-          }
-        },
-        {
-          $group: {
-            _id: "$status",
-            count: { $sum: 1 }
-          }
-        }
-      ]);
-      
-      // Format the result
-      const statuses = ['pending', 'preparing', 'served', 'complete', 'cancelled'];
-      const result = statuses.map(status => {
-        const found = statusDistribution.find(item => item._id === status);
-        return {
-          status,
-          count: found ? found.count : 0
-        };
-      });
-      
-      return res.status(200).json(result);
-    } catch (error) {
-      console.error('Error getting order status distribution:', error);
-      return res.status(500).json({ error: 'Failed to get order status distribution' });
+      const thirtyDaysAgo = addDays(startOfToday(), -30);
+      const [rows] = await pool.query(q_status_distribution_30d, [thirtyDaysAgo]);
+
+      const map = new Map(rows.map(r => [r.status, Number(r.count)]));
+      const result = STATUSES_ALL.map(s => ({ status: s, count: map.get(s) ?? 0 }));
+
+      return res.status(StatusCodes.OK).json(result);
+    } catch (err) {
+      console.error("Error getting order status distribution:", err);
+      return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: "Failed to get order status distribution" });
     }
   },
-  
-  // Get payment method distribution
+
+  // Payment method distribution (paid only) last 30 days
   getPaymentMethodDistribution: async (req, res) => {
     try {
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      
-      const paymentDistribution = await Order.aggregate([
-        { 
-          $match: { 
-            createdAt: { $gte: thirtyDaysAgo },
-            payment_status: 'paid'
-          }
-        },
-        {
-          $group: {
-            _id: "$payment_method",
-            count: { $sum: 1 },
-            total: { $sum: "$total_amount" }
-          }
-        }
-      ]);
-      
-      // Format the result
-      const methods = ['cash', 'online_payment'];
-      const result = methods.map(method => {
-        const found = paymentDistribution.find(item => item._id === method);
-        return {
-          method,
-          count: found ? found.count : 0,
-          total: found ? found.total : 0
-        };
-      });
-      
-      return res.status(200).json(result);
-    } catch (error) {
-      console.error('Error getting payment method distribution:', error);
-      return res.status(500).json({ error: 'Failed to get payment method distribution' });
+      const thirtyDaysAgo = addDays(startOfToday(), -30);
+      const [rows] = await pool.query(q_payment_method_distribution_30d, [thirtyDaysAgo]);
+
+      const byMethod = new Map(rows.map(r => [r.payment_method, { count: Number(r.count), total: Number(r.total) }]));
+      const result = METHODS_ALL.map(m => ({
+        method: m,
+        count: byMethod.get(m)?.count ?? 0,
+        total: byMethod.get(m)?.total ?? 0
+      }));
+
+      return res.status(StatusCodes.OK).json(result);
+    } catch (err) {
+      console.error("Error getting payment method distribution:", err);
+      return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: "Failed to get payment method distribution" });
     }
   },
-  
-  // Get hourly order distribution
+
+  // Hourly order distribution last 30 days
   getHourlyOrderDistribution: async (req, res) => {
     try {
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      
-      const hourlyDistribution = await Order.aggregate([
-        { 
-          $match: { 
-            createdAt: { $gte: thirtyDaysAgo }
-          }
-        },
-        {
-          $group: {
-            _id: { $hour: "$createdAt" },
-            count: { $sum: 1 },
-            revenue: { $sum: "$total_amount" }
-          }
-        },
-        { $sort: { _id: 1 } }
-      ]);
-      
-      // Fill in missing hours with zero
+      const thirtyDaysAgo = addDays(startOfToday(), -30);
+      const [rows] = await pool.query(q_hourly_distribution_30d, [thirtyDaysAgo]);
+
+      const byHour = new Map(rows.map(r => [r.hr, { count: Number(r.count), revenue: Number(r.revenue) }]));
       const result = [];
-      for (let i = 0; i < 24; i++) {
-        const existingHour = hourlyDistribution.find(hour => hour._id === i);
-        result.push({
-          hour: i,
-          count: existingHour ? existingHour.count : 0,
-          revenue: existingHour ? existingHour.revenue : 0
-        });
+      for (let h = 0; h < 24; h++) {
+        const v = byHour.get(h) || { count: 0, revenue: 0 };
+        result.push({ hour: h, count: v.count, revenue: v.revenue });
       }
-      
-      return res.status(200).json(result);
-    } catch (error) {
-      console.error('Error getting hourly order distribution:', error);
-      return res.status(500).json({ error: 'Failed to get hourly order distribution' });
+
+      return res.status(StatusCodes.OK).json(result);
+    } catch (err) {
+      console.error("Error getting hourly order distribution:", err);
+      return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: "Failed to get hourly order distribution" });
     }
   },
-  
-  // Get all dashboard statistics in one call
+
+  // Combine all statistics (sequential to keep it simple)
   getAllDashboardStats: async (req, res) => {
     try {
-      const today = new Date();
-      const thirtyDaysAgo = new Date(today);
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      
-      // Basic stats
-      const basicStats = await OrderController.getDashboardStats(req, {
-        status: (code, data) => data,
-        json: (data) => data
+      const [
+        basicStatsRes,
+        dailyRevenueRes,
+        weeklyRevenueRes,
+        monthlyRevenueRes,
+        mostSoldItemsRes,
+        revenueByCategoryRes,
+        yearOverYearGrowthRes,
+        orderStatusDistributionRes,
+        paymentMethodDistributionRes,
+        hourlyOrderDistributionRes,
+      ] = await Promise.all([
+        StatisticsController.getDashboardStats(req, { status: () => ({ json: (d) => d }), json: (d) => d }),
+        StatisticsController.getDailyRevenue(req, { status: () => ({ json: (d) => d }), json: (d) => d }),
+        StatisticsController.getWeeklyRevenue(req, { status: () => ({ json: (d) => d }), json: (d) => d }),
+        StatisticsController.getMonthlyRevenue(req, { status: () => ({ json: (d) => d }), json: (d) => d }),
+        StatisticsController.getMostSoldItems(req, { status: () => ({ json: (d) => d }), json: (d) => d }),
+        StatisticsController.getRevenueByCategory(req, { status: () => ({ json: (d) => d }), json: (d) => d }),
+        StatisticsController.getYearOverYearGrowth(req, { status: () => ({ json: (d) => d }), json: (d) => d }),
+        StatisticsController.getOrderStatusDistribution(req, { status: () => ({ json: (d) => d }), json: (d) => d }),
+        StatisticsController.getPaymentMethodDistribution(req, { status: () => ({ json: (d) => d }), json: (d) => d }),
+        StatisticsController.getHourlyOrderDistribution(req, { status: () => ({ json: (d) => d }), json: (d) => d }),
+      ]);
+
+      return res.status(StatusCodes.OK).json({
+        basicStats: basicStatsRes,
+        dailyRevenue: dailyRevenueRes,
+        weeklyRevenue: weeklyRevenueRes,
+        monthlyRevenue: monthlyRevenueRes,
+        mostSoldItems: mostSoldItemsRes,
+        revenueByCategory: revenueByCategoryRes,
+        yearOverYearGrowth: yearOverYearGrowthRes,
+        orderStatusDistribution: orderStatusDistributionRes,
+        paymentMethodDistribution: paymentMethodDistributionRes,
+        hourlyOrderDistribution: hourlyOrderDistributionRes,
       });
-      
-      // Daily revenue
-      const dailyRevenue = await OrderController.getDailyRevenue(req, {
-        status: (code, data) => data,
-        json: (data) => data
-      });
-      
-      // Weekly revenue
-      const weeklyRevenue = await OrderController.getWeeklyRevenue(req, {
-        status: (code, data) => data,
-        json: (data) => data
-      });
-      
-      // Monthly revenue
-      const monthlyRevenue = await OrderController.getMonthlyRevenue(req, {
-        status: (code, data) => data,
-        json: (data) => data
-      });
-      
-      // Most sold items
-      const mostSoldItems = await OrderController.getMostSoldItems(req, {
-        status: (code, data) => data,
-        json: (data) => data
-      });
-      
-      // Revenue by category
-      const revenueByCategory = await OrderController.getRevenueByCategory(req, {
-        status: (code, data) => data,
-        json: (data) => data
-      });
-      
-      // Year-over-year growth
-      const yearOverYearGrowth = await OrderController.getYearOverYearGrowth(req, {
-        status: (code, data) => data,
-        json: (data) => data
-      });
-      
-      // Order status distribution
-      const orderStatusDistribution = await OrderController.getOrderStatusDistribution(req, {
-        status: (code, data) => data,
-        json: (data) => data
-      });
-      
-      // Payment method distribution
-      const paymentMethodDistribution = await OrderController.getPaymentMethodDistribution(req, {
-        status: (code, data) => data,
-        json: (data) => data
-      });
-      
-      // Hourly order distribution
-      const hourlyOrderDistribution = await OrderController.getHourlyOrderDistribution(req, {
-        status: (code, data) => data,
-        json: (data) => data
-      });
-      
-      return res.status(200).json({
-        basicStats,
-        dailyRevenue,
-        weeklyRevenue,
-        monthlyRevenue,
-        mostSoldItems,
-        revenueByCategory,
-        yearOverYearGrowth,
-        orderStatusDistribution,
-        paymentMethodDistribution,
-        hourlyOrderDistribution
-      });
-    } catch (error) {
-      console.error('Error getting all dashboard stats:', error);
-      return res.status(500).json({ error: 'Failed to get all dashboard statistics' });
+    } catch (err) {
+      console.error("Error getting all dashboard stats:", err);
+      return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: "Failed to get all dashboard statistics" });
     }
-  }
+  },
 };
 
 export default StatisticsController;

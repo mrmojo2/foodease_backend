@@ -53,4 +53,58 @@ CREATE TABLE menu_item_customization_options (
 );
 
 
+CREATE TABLE orders (
+    _id INT AUTO_INCREMENT PRIMARY KEY,
+    order_number VARCHAR(100) NOT NULL UNIQUE,
+    table_id INT NOT NULL,
+    status ENUM('pending', 'preparing', 'served', 'complete', 'cancelled') DEFAULT 'pending',
+    total_amount DECIMAL(10,2) NOT NULL,
+    payment_status ENUM('pending', 'paid') DEFAULT 'pending',
+    payment_method ENUM('cash', 'online_payment') DEFAULT 'cash',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (table_id) REFERENCES tables(_id)
+);
+
+CREATE TABLE order_items (
+    _id INT AUTO_INCREMENT PRIMARY KEY,
+    order_id INT NOT NULL,
+    menu_item_id INT NOT NULL,
+    quantity INT NOT NULL CHECK (quantity >= 1),
+    price DECIMAL(10,2) NOT NULL,
+    notes TEXT,
+
+    FOREIGN KEY (order_id) REFERENCES orders(_id) ON DELETE CASCADE,
+    FOREIGN KEY (menu_item_id) REFERENCES menu_items(_id)
+);
+
+CREATE TABLE order_item_customizations (
+    _id INT AUTO_INCREMENT PRIMARY KEY,
+    order_item_id INT NOT NULL,
+    option_name VARCHAR(100),
+    selection VARCHAR(100),
+    price_addition DECIMAL(10,2),
+
+    FOREIGN KEY (order_item_id) REFERENCES order_items(_id) ON DELETE CASCADE
+);
+
+CREATE TABLE tables (
+  _id INT AUTO_INCREMENT PRIMARY KEY,
+  table_number VARCHAR(50) NOT NULL UNIQUE,
+  capacity INT NOT NULL CHECK (capacity > 0),
+  status ENUM('available','occupied','reserved','maintenance') DEFAULT 'available',
+  current_order_id INT NULL, -- will reference orders(_id) after orders is created
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+-- ALTER TABLE tables
+--   ADD CONSTRAINT fk_tables_current_order
+--   FOREIGN KEY (current_order_id) REFERENCES orders(_id)
+--   ON DELETE SET NULL;
+
+
+
 
