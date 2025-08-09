@@ -118,8 +118,6 @@ GET    /stats/custom
 
 - JWT stored in HTTP-Only cookie.
 - Protect admin routes with auth middleware.
-- Use strong `JWT_SECRET` in production.
-- Set `COOKIE_SECURE=true` on HTTPS.
 
 ---
 
@@ -129,6 +127,3 @@ GET    /stats/custom
 - Default images for categories/menu items.
 
 ---
-
-## License
-MIT
